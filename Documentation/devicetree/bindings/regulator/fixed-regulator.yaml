@@ -57,12 +57,14 @@ properties:
     maxItems: 1
 
   power-domains:
+    deprecated: true
     description:
       Power domain to use for enable control. This binding is only
       available if the compatible is chosen to regulator-fixed-domain.
     maxItems: 1
 
   required-opps:
+    deprecated: true
     description:
       Performance state to use for enable control. This binding is only
       available if the compatible is chosen to regulator-fixed-domain. The
@@ -72,11 +74,9 @@ properties:
 
   startup-delay-us:
     description: startup time in microseconds
-    $ref: /schemas/types.yaml#/definitions/uint32
 
   off-on-delay-us:
     description: off delay time in microseconds
-    $ref: /schemas/types.yaml#/definitions/uint32
 
   enable-active-high:
     description:

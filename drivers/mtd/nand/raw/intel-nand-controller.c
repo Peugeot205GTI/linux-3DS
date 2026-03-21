@@ -20,6 +20,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/types.h>
+#include <linux/units.h>
 #include <asm/unaligned.h>
 
 #define EBU_CLC			0x000
@@ -102,7 +103,6 @@
 
 #define MAX_CS	2
 
-#define HZ_PER_MHZ	1000000L
 #define USEC_PER_SEC	1000000L
 
 struct ebu_nand_cs {
@@ -318,8 +318,10 @@ static int ebu_dma_start(struct ebu_nand_controller *ebu_host, u32 dir,
 	}
 
 	tx = dmaengine_prep_slave_single(chan, buf_dma, len, dir, flags);
-	if (!tx)
-		return -ENXIO;
+	if (!tx) {
+		ret = -ENXIO;
+		goto err_unmap;
+	}
 
 	tx->callback = callback;
 	tx->callback_param = ebu_host;
@@ -579,7 +581,7 @@ static int ebu_nand_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct ebu_nand_controller *ebu_host;
 	struct nand_chip *nand;
-	struct mtd_info *mtd = NULL;
+	struct mtd_info *mtd;
 	struct resource *res;
 	char *resname;
 	int ret;
@@ -629,30 +631,39 @@ static int ebu_nand_probe(struct platform_device *pdev)
 	ebu_host->clk_rate = clk_get_rate(ebu_host->clk);
 
 	ebu_host->dma_tx = dma_request_chan(dev, "tx");
-	if (IS_ERR(ebu_host->dma_tx))
-		return dev_err_probe(dev, PTR_ERR(ebu_host->dma_tx),
-				     "failed to request DMA tx chan!.\n");
+	if (IS_ERR(ebu_host->dma_tx)) {
+		ret = dev_err_probe(dev, PTR_ERR(ebu_host->dma_tx),
+				    "failed to request DMA tx chan!.\n");
+		goto err_disable_unprepare_clk;
+	}
 
 	ebu_host->dma_rx = dma_request_chan(dev, "rx");
-	if (IS_ERR(ebu_host->dma_rx))
-		return dev_err_probe(dev, PTR_ERR(ebu_host->dma_rx),
-				     "failed to request DMA rx chan!.\n");
+	if (IS_ERR(ebu_host->dma_rx)) {
+		ret = dev_err_probe(dev, PTR_ERR(ebu_host->dma_rx),
+				    "failed to request DMA rx chan!.\n");
+		ebu_host->dma_rx = NULL;
+		goto err_cleanup_dma;
+	}
 
 	resname = devm_kasprintf(dev, GFP_KERNEL, "addr_sel%d", cs);
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, resname);
-	if (!res)
-		return -EINVAL;
+	if (!res) {
+		ret = -EINVAL;
+		goto err_cleanup_dma;
+	}
 	ebu_host->cs[cs].addr_sel = res->start;
 	writel(ebu_host->cs[cs].addr_sel | EBU_ADDR_MASK(5) | EBU_ADDR_SEL_REGEN,
 	       ebu_host->ebu + EBU_ADDR_SEL(cs));
 
 	nand_set_flash_node(&ebu_host->chip, dev->of_node);
-	if (!mtd->name) {
-		dev_err(ebu_host->dev, "NAND label property is mandatory\n");
-		return -EINVAL;
-	}
 
 	mtd = nand_to_mtd(&ebu_host->chip);
+	if (!mtd->name) {
+		dev_err(ebu_host->dev, "NAND label property is mandatory\n");
+		ret = -EINVAL;
+		goto err_cleanup_dma;
+	}
+
 	mtd->dev.parent = dev;
 	ebu_host->dev = dev;
 
@@ -678,6 +689,7 @@ err_clean_nand:
 	nand_cleanup(&ebu_host->chip);
 err_cleanup_dma:
 	ebu_dma_cleanup(ebu_host);
+err_disable_unprepare_clk:
 	clk_disable_unprepare(ebu_host->clk);
 
 	return ret;

@@ -642,7 +642,7 @@ static int rvin_parallel_parse_of(struct rvin_dev *vin)
 	}
 
 	asd = v4l2_async_notifier_add_fwnode_subdev(&vin->notifier, fwnode,
-						    sizeof(*asd));
+						    struct v4l2_async_subdev);
 	if (IS_ERR(asd)) {
 		ret = PTR_ERR(asd);
 		goto out;
@@ -654,7 +654,7 @@ static int rvin_parallel_parse_of(struct rvin_dev *vin)
 out:
 	fwnode_handle_put(fwnode);
 
-	return 0;
+	return ret;
 }
 
 static int rvin_parallel_init(struct rvin_dev *vin)
@@ -842,7 +842,8 @@ static int rvin_mc_parse_of(struct rvin_dev *vin, unsigned int id)
 	}
 
 	asd = v4l2_async_notifier_add_fwnode_subdev(&vin->group->notifier,
-						    fwnode, sizeof(*asd));
+						    fwnode,
+						    struct v4l2_async_subdev);
 	if (IS_ERR(asd)) {
 		ret = PTR_ERR(asd);
 		goto out;
@@ -1359,6 +1360,10 @@ static const struct of_device_id rvin_of_id_table[] = {
 	},
 	{
 		.compatible = "renesas,vin-r8a7796",
+		.data = &rcar_info_r8a7796,
+	},
+	{
+		.compatible = "renesas,vin-r8a77961",
 		.data = &rcar_info_r8a7796,
 	},
 	{

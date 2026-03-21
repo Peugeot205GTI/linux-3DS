@@ -24,6 +24,7 @@
 #include "compression.h"
 #include "volumes.h"
 #include "misc.h"
+#include "btrfs_inode.h"
 
 /*
  * Error message should follow the following format:
@@ -760,6 +761,7 @@ int btrfs_check_chunk_valid(struct extent_buffer *leaf,
 {
 	struct btrfs_fs_info *fs_info = leaf->fs_info;
 	u64 length;
+	u64 chunk_end;
 	u64 stripe_len;
 	u16 num_stripes;
 	u16 sub_stripes;
@@ -814,6 +816,12 @@ int btrfs_check_chunk_valid(struct extent_buffer *leaf,
 			  "invalid chunk length, have %llu", length);
 		return -EUCLEAN;
 	}
+	if (unlikely(check_add_overflow(logical, length, &chunk_end))) {
+		chunk_err(leaf, chunk, logical,
+"invalid chunk logical start and length, have logical start %llu length %llu",
+			  logical, length);
+		return -EUCLEAN;
+	}
 	if (unlikely(!is_power_of_2(stripe_len) || stripe_len != BTRFS_STRIPE_LEN)) {
 		chunk_err(leaf, chunk, logical,
 			  "invalid chunk stripe length: %llu",
@@ -866,13 +874,22 @@ int btrfs_check_chunk_valid(struct extent_buffer *leaf,
 		}
 	}
 
-	if (unlikely((type & BTRFS_BLOCK_GROUP_RAID10 && sub_stripes != 2) ||
-		     (type & BTRFS_BLOCK_GROUP_RAID1 && num_stripes != 2) ||
-		     (type & BTRFS_BLOCK_GROUP_RAID5 && num_stripes < 2) ||
-		     (type & BTRFS_BLOCK_GROUP_RAID6 && num_stripes < 3) ||
-		     (type & BTRFS_BLOCK_GROUP_DUP && num_stripes != 2) ||
+	if (unlikely((type & BTRFS_BLOCK_GROUP_RAID10 &&
+		      sub_stripes != btrfs_raid_array[BTRFS_RAID_RAID10].sub_stripes) ||
+		     (type & BTRFS_BLOCK_GROUP_RAID1 &&
+		      num_stripes != btrfs_raid_array[BTRFS_RAID_RAID1].devs_min) ||
+		     (type & BTRFS_BLOCK_GROUP_RAID1C3 &&
+		      num_stripes != btrfs_raid_array[BTRFS_RAID_RAID1C3].devs_min) ||
+		     (type & BTRFS_BLOCK_GROUP_RAID1C4 &&
+		      num_stripes != btrfs_raid_array[BTRFS_RAID_RAID1C4].devs_min) ||
+		     (type & BTRFS_BLOCK_GROUP_RAID5 &&
+		      num_stripes < btrfs_raid_array[BTRFS_RAID_RAID5].devs_min) ||
+		     (type & BTRFS_BLOCK_GROUP_RAID6 &&
+		      num_stripes < btrfs_raid_array[BTRFS_RAID_RAID6].devs_min) ||
+		     (type & BTRFS_BLOCK_GROUP_DUP &&
+		      num_stripes != btrfs_raid_array[BTRFS_RAID_DUP].dev_stripes) ||
 		     ((type & BTRFS_BLOCK_GROUP_PROFILE_MASK) == 0 &&
-		      num_stripes != 1))) {
+		      num_stripes != btrfs_raid_array[BTRFS_RAID_SINGLE].dev_stripes))) {
 		chunk_err(leaf, chunk, logical,
 			"invalid num_stripes:sub_stripes %u:%u for profile %llu",
 			num_stripes, sub_stripes,
@@ -992,6 +1009,8 @@ static int check_inode_item(struct extent_buffer *leaf,
 	u32 valid_mask = (S_IFMT | S_ISUID | S_ISGID | S_ISVTX | 0777);
 	u32 mode;
 	int ret;
+	u32 flags;
+	u32 ro_flags;
 
 	ret = check_inode_key(leaf, key, slot);
 	if (unlikely(ret < 0))
@@ -1047,11 +1066,17 @@ static int check_inode_item(struct extent_buffer *leaf,
 			btrfs_inode_nlink(leaf, iitem));
 		return -EUCLEAN;
 	}
-	if (unlikely(btrfs_inode_flags(leaf, iitem) & ~BTRFS_INODE_FLAG_MASK)) {
+	btrfs_inode_split_flags(btrfs_inode_flags(leaf, iitem), &flags, &ro_flags);
+	if (unlikely(flags & ~BTRFS_INODE_FLAG_MASK)) {
 		inode_item_err(leaf, slot,
-			       "unknown flags detected: 0x%llx",
-			       btrfs_inode_flags(leaf, iitem) &
-			       ~BTRFS_INODE_FLAG_MASK);
+			       "unknown incompat flags detected: 0x%x", flags);
+		return -EUCLEAN;
+	}
+	if (unlikely(!sb_rdonly(fs_info->sb) &&
+		     (ro_flags & ~BTRFS_INODE_RO_FLAG_MASK))) {
+		inode_item_err(leaf, slot,
+			"unknown ro-compat flags detected on writeable mount: 0x%x",
+			ro_flags);
 		return -EUCLEAN;
 	}
 	return 0;
@@ -1283,6 +1308,11 @@ static int check_extent_item(struct extent_buffer *leaf,
 				   key->offset, fs_info->sectorsize);
 			return -EUCLEAN;
 		}
+		if (unlikely(flags & BTRFS_BLOCK_FLAG_FULL_BACKREF)) {
+			extent_err(leaf, slot,
+			"invalid extent flag, data has full backref set");
+			return -EUCLEAN;
+		}
 	}
 	ptr = (unsigned long)(struct btrfs_extent_item *)(ei + 1);
 
@@ -1446,22 +1476,14 @@ static int check_extent_data_ref(struct extent_buffer *leaf,
 		return -EUCLEAN;
 	}
 	for (; ptr < end; ptr += sizeof(*dref)) {
-		u64 root_objectid;
-		u64 owner;
 		u64 offset;
-		u64 hash;
 
+		/*
+		 * We cannot check the extent_data_ref hash due to possible
+		 * overflow from the leaf due to hash collisions.
+		 */
 		dref = (struct btrfs_extent_data_ref *)ptr;
-		root_objectid = btrfs_extent_data_ref_root(leaf, dref);
-		owner = btrfs_extent_data_ref_objectid(leaf, dref);
 		offset = btrfs_extent_data_ref_offset(leaf, dref);
-		hash = hash_extent_data_ref(root_objectid, owner, offset);
-		if (unlikely(hash != key->offset)) {
-			extent_err(leaf, slot,
-	"invalid extent data ref hash, item has 0x%016llx key has 0x%016llx",
-				   hash, key->offset);
-			return -EUCLEAN;
-		}
 		if (unlikely(!IS_ALIGNED(offset, leaf->fs_info->sectorsize))) {
 			extent_err(leaf, slot,
 	"invalid extent data backref offset, have %llu expect aligned to %u",

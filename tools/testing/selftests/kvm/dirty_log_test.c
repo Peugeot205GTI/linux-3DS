@@ -9,8 +9,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <time.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <sys/types.h>
@@ -18,10 +16,11 @@
 #include <errno.h>
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
-#include <asm/barrier.h>
+#include <linux/atomic.h>
 
-#include "test_util.h"
 #include "kvm_util.h"
+#include "test_util.h"
+#include "guest_modes.h"
 #include "processor.h"
 
 #define VCPU_ID				1
@@ -138,12 +137,20 @@ static uint64_t host_clear_count;
 static uint64_t host_track_next_count;
 
 /* Whether dirty ring reset is requested, or finished */
-static sem_t dirty_ring_vcpu_stop;
-static sem_t dirty_ring_vcpu_cont;
+static sem_t sem_vcpu_stop;
+static sem_t sem_vcpu_cont;
+/*
+ * This is only set by main thread, and only cleared by vcpu thread.  It is
+ * used to request vcpu thread to stop at the next GUEST_SYNC, since GUEST_SYNC
+ * is the only place that we'll guarantee both "dirty bit" and "dirty data"
+ * will match.  E.g., SIG_IPI won't guarantee that if the vcpu is interrupted
+ * after setting dirty bit but before the data is written.
+ */
+static atomic_t vcpu_sync_stop_requested;
 /*
  * This is updated by the vcpu thread to tell the host whether it's a
  * ring-full event.  It should only be read until a sem_wait() of
- * dirty_ring_vcpu_stop and before vcpu continues to run.
+ * sem_vcpu_stop and before vcpu continues to run.
  */
 static bool dirty_ring_vcpu_ring_full;
 /*
@@ -235,6 +242,17 @@ static void clear_log_collect_dirty_pages(struct kvm_vm *vm, int slot,
 	kvm_vm_clear_dirty_log(vm, slot, bitmap, 0, num_pages);
 }
 
+/* Should only be called after a GUEST_SYNC */
+static void vcpu_handle_sync_stop(void)
+{
+	if (atomic_read(&vcpu_sync_stop_requested)) {
+		/* It means main thread is sleeping waiting */
+		atomic_set(&vcpu_sync_stop_requested, false);
+		sem_post(&sem_vcpu_stop);
+		sem_wait_until(&sem_vcpu_cont);
+	}
+}
+
 static void default_after_vcpu_run(struct kvm_vm *vm, int ret, int err)
 {
 	struct kvm_run *run = vcpu_state(vm, VCPU_ID);
@@ -245,6 +263,8 @@ static void default_after_vcpu_run(struct kvm_vm *vm, int ret, int err)
 	TEST_ASSERT(get_ucall(vm, VCPU_ID, NULL) == UCALL_SYNC,
 		    "Invalid guest sync status: exit_reason=%s\n",
 		    exit_reason_str(run->exit_reason));
+
+	vcpu_handle_sync_stop();
 }
 
 static bool dirty_ring_supported(void)
@@ -302,13 +322,13 @@ static void dirty_ring_wait_vcpu(void)
 {
 	/* This makes sure that hardware PML cache flushed */
 	vcpu_kick();
-	sem_wait_until(&dirty_ring_vcpu_stop);
+	sem_wait_until(&sem_vcpu_stop);
 }
 
 static void dirty_ring_continue_vcpu(void)
 {
 	pr_info("Notifying vcpu to continue\n");
-	sem_post(&dirty_ring_vcpu_cont);
+	sem_post(&sem_vcpu_cont);
 }
 
 static void dirty_ring_collect_dirty_pages(struct kvm_vm *vm, int slot,
@@ -362,11 +382,11 @@ static void dirty_ring_after_vcpu_run(struct kvm_vm *vm, int ret, int err)
 		/* Update the flag first before pause */
 		WRITE_ONCE(dirty_ring_vcpu_ring_full,
 			   run->exit_reason == KVM_EXIT_DIRTY_RING_FULL);
-		sem_post(&dirty_ring_vcpu_stop);
+		sem_post(&sem_vcpu_stop);
 		pr_info("vcpu stops because %s...\n",
 			dirty_ring_vcpu_ring_full ?
 			"dirty ring is full" : "vcpu is kicked out");
-		sem_wait_until(&dirty_ring_vcpu_cont);
+		sem_wait_until(&sem_vcpu_cont);
 		pr_info("vcpu continues now.\n");
 	} else {
 		TEST_ASSERT(false, "Invalid guest sync status: "
@@ -378,7 +398,7 @@ static void dirty_ring_after_vcpu_run(struct kvm_vm *vm, int ret, int err)
 static void dirty_ring_before_vcpu_join(void)
 {
 	/* Kick another round of vcpu just to make sure it will quit */
-	sem_post(&dirty_ring_vcpu_cont);
+	sem_post(&sem_vcpu_cont);
 }
 
 struct log_mode {
@@ -506,9 +526,8 @@ static void *vcpu_worker(void *data)
 	 */
 	sigmask->len = 8;
 	pthread_sigmask(0, NULL, sigset);
+	sigdelset(sigset, SIG_IPI);
 	vcpu_ioctl(vm, VCPU_ID, KVM_SET_SIGNAL_MASK, sigmask);
-	sigaddset(sigset, SIG_IPI);
-	pthread_sigmask(SIG_BLOCK, sigset, NULL);
 
 	sigemptyset(sigset);
 	sigaddset(sigset, SIG_IPI);
@@ -661,7 +680,7 @@ static struct kvm_vm *create_vm(enum vm_guest_mode mode, uint32_t vcpuid,
 	pr_info("Testing guest mode: %s\n", vm_guest_mode_string(mode));
 
 	vm = vm_create(mode, DEFAULT_GUEST_PHY_PAGES + extra_pg_pages, O_RDWR);
-	kvm_vm_elf_load(vm, program_invocation_name, 0, 0);
+	kvm_vm_elf_load(vm, program_invocation_name);
 #ifdef __x86_64__
 	vm_create_irqchip(vm);
 #endif
@@ -673,9 +692,15 @@ static struct kvm_vm *create_vm(enum vm_guest_mode mode, uint32_t vcpuid,
 #define DIRTY_MEM_BITS 30 /* 1G */
 #define PAGE_SHIFT_4K  12
 
-static void run_test(enum vm_guest_mode mode, unsigned long iterations,
-		     unsigned long interval, uint64_t phys_offset)
+struct test_params {
+	unsigned long iterations;
+	unsigned long interval;
+	uint64_t phys_offset;
+};
+
+static void run_test(enum vm_guest_mode mode, void *arg)
 {
+	struct test_params *p = arg;
 	struct kvm_vm *vm;
 	unsigned long *bmap;
 
@@ -709,12 +734,12 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 	host_page_size = getpagesize();
 	host_num_pages = vm_num_host_pages(mode, guest_num_pages);
 
-	if (!phys_offset) {
+	if (!p->phys_offset) {
 		guest_test_phys_mem = (vm_get_max_gfn(vm) -
 				       guest_num_pages) * guest_page_size;
 		guest_test_phys_mem &= ~(host_page_size - 1);
 	} else {
-		guest_test_phys_mem = phys_offset;
+		guest_test_phys_mem = p->phys_offset;
 	}
 
 #ifdef __s390x__
@@ -724,8 +749,8 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 
 	pr_info("guest physical test memory offset: 0x%lx\n", guest_test_phys_mem);
 
-	bmap = bitmap_alloc(host_num_pages);
-	host_bmap_track = bitmap_alloc(host_num_pages);
+	bmap = bitmap_zalloc(host_num_pages);
+	host_bmap_track = bitmap_zalloc(host_num_pages);
 
 	/* Add an extra memory slot for testing dirty logging */
 	vm_userspace_mem_region_add(vm, VM_MEM_SRC_ANONYMOUS,
@@ -735,7 +760,7 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 				    KVM_MEM_LOG_DIRTY_PAGES);
 
 	/* Do mapping for the dirty track memory slot */
-	virt_map(vm, guest_test_virt_mem, guest_test_phys_mem, guest_num_pages, 0);
+	virt_map(vm, guest_test_virt_mem, guest_test_phys_mem, guest_num_pages);
 
 	/* Cache the HVA pointer of the region */
 	host_test_mem = addr_gpa2hva(vm, (vm_paddr_t)guest_test_phys_mem);
@@ -758,12 +783,30 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 
 	pthread_create(&vcpu_thread, NULL, vcpu_worker, vm);
 
-	while (iteration < iterations) {
+	while (iteration < p->iterations) {
 		/* Give the vcpu thread some time to dirty some pages */
-		usleep(interval * 1000);
+		usleep(p->interval * 1000);
 		log_mode_collect_dirty_pages(vm, TEST_MEM_SLOT_INDEX,
 					     bmap, host_num_pages);
+
+		/*
+		 * See vcpu_sync_stop_requested definition for details on why
+		 * we need to stop vcpu when verify data.
+		 */
+		atomic_set(&vcpu_sync_stop_requested, true);
+		sem_wait_until(&sem_vcpu_stop);
+		/*
+		 * NOTE: for dirty ring, it's possible that we didn't stop at
+		 * GUEST_SYNC but instead we stopped because ring is full;
+		 * that's okay too because ring full means we're only missing
+		 * the flush of the last page, and since we handle the last
+		 * page specially verification will succeed anyway.
+		 */
+		assert(host_log_mode == LOG_MODE_DIRTY_RING ||
+		       atomic_read(&vcpu_sync_stop_requested) == false);
 		vm_dirty_log_verify(mode, bmap);
+		sem_post(&sem_vcpu_cont);
+
 		iteration++;
 		sync_global_to_guest(vm, iteration);
 	}
@@ -783,20 +826,8 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 	kvm_vm_free(vm);
 }
 
-struct guest_mode {
-	bool supported;
-	bool enabled;
-};
-static struct guest_mode guest_modes[NUM_VM_MODES];
-
-#define guest_mode_init(mode, supported, enabled) ({ \
-	guest_modes[mode] = (struct guest_mode){ supported, enabled }; \
-})
-
 static void help(char *name)
 {
-	int i;
-
 	puts("");
 	printf("usage: %s [-h] [-i iterations] [-I interval] "
 	       "[-p offset] [-m mode]\n", name);
@@ -813,51 +844,24 @@ static void help(char *name)
 	printf(" -M: specify the host logging mode "
 	       "(default: run all log modes).  Supported modes: \n\t");
 	log_modes_dump();
-	printf(" -m: specify the guest mode ID to test "
-	       "(default: test all supported modes)\n"
-	       "     This option may be used multiple times.\n"
-	       "     Guest mode IDs:\n");
-	for (i = 0; i < NUM_VM_MODES; ++i) {
-		printf("         %d:    %s%s\n", i, vm_guest_mode_string(i),
-		       guest_modes[i].supported ? " (supported)" : "");
-	}
+	guest_modes_help();
 	puts("");
 	exit(0);
 }
 
 int main(int argc, char *argv[])
 {
-	unsigned long iterations = TEST_HOST_LOOP_N;
-	unsigned long interval = TEST_HOST_LOOP_INTERVAL;
-	bool mode_selected = false;
-	uint64_t phys_offset = 0;
-	unsigned int mode;
-	int opt, i, j;
+	struct test_params p = {
+		.iterations = TEST_HOST_LOOP_N,
+		.interval = TEST_HOST_LOOP_INTERVAL,
+	};
+	int opt, i;
+	sigset_t sigset;
 
-	sem_init(&dirty_ring_vcpu_stop, 0, 0);
-	sem_init(&dirty_ring_vcpu_cont, 0, 0);
+	sem_init(&sem_vcpu_stop, 0, 0);
+	sem_init(&sem_vcpu_cont, 0, 0);
 
-#ifdef __x86_64__
-	guest_mode_init(VM_MODE_PXXV48_4K, true, true);
-#endif
-#ifdef __aarch64__
-	guest_mode_init(VM_MODE_P40V48_4K, true, true);
-	guest_mode_init(VM_MODE_P40V48_64K, true, true);
-
-	{
-		unsigned int limit = kvm_check_cap(KVM_CAP_ARM_VM_IPA_SIZE);
-
-		if (limit >= 52)
-			guest_mode_init(VM_MODE_P52V48_64K, true, true);
-		if (limit >= 48) {
-			guest_mode_init(VM_MODE_P48V48_4K, true, true);
-			guest_mode_init(VM_MODE_P48V48_64K, true, true);
-		}
-	}
-#endif
-#ifdef __s390x__
-	guest_mode_init(VM_MODE_P40V48_4K, true, true);
-#endif
+	guest_modes_append_default();
 
 	while ((opt = getopt(argc, argv, "c:hi:I:p:m:M:")) != -1) {
 		switch (opt) {
@@ -865,24 +869,16 @@ int main(int argc, char *argv[])
 			test_dirty_ring_count = strtol(optarg, NULL, 10);
 			break;
 		case 'i':
-			iterations = strtol(optarg, NULL, 10);
+			p.iterations = strtol(optarg, NULL, 10);
 			break;
 		case 'I':
-			interval = strtol(optarg, NULL, 10);
+			p.interval = strtol(optarg, NULL, 10);
 			break;
 		case 'p':
-			phys_offset = strtoull(optarg, NULL, 0);
+			p.phys_offset = strtoull(optarg, NULL, 0);
 			break;
 		case 'm':
-			if (!mode_selected) {
-				for (i = 0; i < NUM_VM_MODES; ++i)
-					guest_modes[i].enabled = false;
-				mode_selected = true;
-			}
-			mode = strtoul(optarg, NULL, 10);
-			TEST_ASSERT(mode < NUM_VM_MODES,
-				    "Guest mode ID %d too big", mode);
-			guest_modes[mode].enabled = true;
+			guest_modes_cmdline(optarg);
 			break;
 		case 'M':
 			if (!strcmp(optarg, "all")) {
@@ -911,32 +907,29 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	TEST_ASSERT(iterations > 2, "Iterations must be greater than two");
-	TEST_ASSERT(interval > 0, "Interval must be greater than zero");
+	TEST_ASSERT(p.iterations > 2, "Iterations must be greater than two");
+	TEST_ASSERT(p.interval > 0, "Interval must be greater than zero");
 
 	pr_info("Test iterations: %"PRIu64", interval: %"PRIu64" (ms)\n",
-		iterations, interval);
+		p.iterations, p.interval);
 
 	srandom(time(0));
 
-	for (i = 0; i < NUM_VM_MODES; ++i) {
-		if (!guest_modes[i].enabled)
-			continue;
-		TEST_ASSERT(guest_modes[i].supported,
-			    "Guest mode ID %d (%s) not supported.",
-			    i, vm_guest_mode_string(i));
-		if (host_log_mode_option == LOG_MODE_ALL) {
-			/* Run each log mode */
-			for (j = 0; j < LOG_MODE_NUM; j++) {
-				pr_info("Testing Log Mode '%s'\n",
-					log_modes[j].name);
-				host_log_mode = j;
-				run_test(i, iterations, interval, phys_offset);
-			}
-		} else {
-			host_log_mode = host_log_mode_option;
-			run_test(i, iterations, interval, phys_offset);
+	/* Ensure that vCPU threads start with SIG_IPI blocked.  */
+	sigemptyset(&sigset);
+	sigaddset(&sigset, SIG_IPI);
+	pthread_sigmask(SIG_BLOCK, &sigset, NULL);
+
+	if (host_log_mode_option == LOG_MODE_ALL) {
+		/* Run each log mode */
+		for (i = 0; i < LOG_MODE_NUM; i++) {
+			pr_info("Testing Log Mode '%s'\n", log_modes[i].name);
+			host_log_mode = i;
+			for_each_guest_mode(run_test, &p);
 		}
+	} else {
+		host_log_mode = host_log_mode_option;
+		for_each_guest_mode(run_test, &p);
 	}
 
 	return 0;

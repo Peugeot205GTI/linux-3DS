@@ -1301,6 +1301,11 @@ void rvin_stop_streaming(struct rvin_dev *vin)
 
 	spin_lock_irqsave(&vin->qlock, flags);
 
+	if (vin->state == STOPPED) {
+		spin_unlock_irqrestore(&vin->qlock, flags);
+		return;
+	}
+
 	vin->state = STOPPING;
 
 	/* Wait until only scratch buffer is used, max 3 interrupts. */
@@ -1453,11 +1458,9 @@ int rvin_set_channel_routing(struct rvin_dev *vin, u8 chsel)
 	u32 vnmc;
 	int ret;
 
-	ret = pm_runtime_get_sync(vin->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(vin->dev);
+	ret = pm_runtime_resume_and_get(vin->dev);
+	if (ret < 0)
 		return ret;
-	}
 
 	/* Make register writes take effect immediately. */
 	vnmc = rvin_read(vin, VNMC_REG);

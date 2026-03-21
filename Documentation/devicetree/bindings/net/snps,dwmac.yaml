@@ -21,6 +21,7 @@ select:
       contains:
         enum:
           - snps,dwmac
+          - snps,dwmac-3.40a
           - snps,dwmac-3.50a
           - snps,dwmac-3.610
           - snps,dwmac-3.70a
@@ -28,6 +29,7 @@ select:
           - snps,dwmac-4.00
           - snps,dwmac-4.10a
           - snps,dwmac-4.20a
+          - snps,dwmac-5.10a
           - snps,dwxgmac
           - snps,dwxgmac-2.10
 
@@ -51,12 +53,31 @@ properties:
         - allwinner,sun8i-r40-emac
         - allwinner,sun8i-v3s-emac
         - allwinner,sun50i-a64-emac
+        - loongson,ls2k-dwmac
+        - loongson,ls7a-dwmac
         - amlogic,meson6-dwmac
         - amlogic,meson8b-dwmac
         - amlogic,meson8m2-dwmac
         - amlogic,meson-gxbb-dwmac
         - amlogic,meson-axg-dwmac
+        - loongson,ls2k-dwmac
+        - loongson,ls7a-dwmac
+        - ingenic,jz4775-mac
+        - ingenic,x1000-mac
+        - ingenic,x1600-mac
+        - ingenic,x1830-mac
+        - ingenic,x2000-mac
+        - rockchip,px30-gmac
+        - rockchip,rk3128-gmac
+        - rockchip,rk3228-gmac
+        - rockchip,rk3288-gmac
+        - rockchip,rk3328-gmac
+        - rockchip,rk3366-gmac
+        - rockchip,rk3368-gmac
+        - rockchip,rk3399-gmac
+        - rockchip,rv1108-gmac
         - snps,dwmac
+        - snps,dwmac-3.40a
         - snps,dwmac-3.50a
         - snps,dwmac-3.610
         - snps,dwmac-3.70a
@@ -64,6 +85,7 @@ properties:
         - snps,dwmac-4.00
         - snps,dwmac-4.10a
         - snps,dwmac-4.20a
+        - snps,dwmac-5.10a
         - snps,dwxgmac
         - snps,dwxgmac-2.10
 
@@ -73,7 +95,6 @@ properties:
 
   interrupts:
     minItems: 1
-    maxItems: 3
     items:
       - description: Combined signal for various interrupt events
       - description: The interrupt to manage the remote wake-up packet detection
@@ -81,7 +102,6 @@ properties:
 
   interrupt-names:
     minItems: 1
-    maxItems: 3
     items:
       - const: macirq
       - const: eth_wake_irq
@@ -89,7 +109,7 @@ properties:
 
   clocks:
     minItems: 1
-    maxItems: 5
+    maxItems: 8
     additionalItems: true
     items:
       - description: GMAC main clock
@@ -101,7 +121,7 @@ properties:
 
   clock-names:
     minItems: 1
-    maxItems: 5
+    maxItems: 8
     additionalItems: true
     contains:
       enum:
@@ -161,7 +181,8 @@ properties:
             * snps,route-dcbcp, DCB Control Packets
             * snps,route-up, Untagged Packets
             * snps,route-multi-broad, Multicast & Broadcast Packets
-          * snps,priority, RX queue priority (Range 0x0 to 0xF)
+          * snps,priority, bitmask of the tagged frames priorities assigned to
+            the queue
 
   snps,mtl-tx-config:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -188,7 +209,10 @@ properties:
             * snps,idle_slope, unlock on WoL
             * snps,high_credit, max write outstanding req. limit
             * snps,low_credit, max read outstanding req. limit
-          * snps,priority, TX queue priority (Range 0x0 to 0xF)
+          * snps,priority, bitmask of the priorities assigned to the queue.
+            When a PFC frame is received with priorities matching the bitmask,
+            the queue is blocked from transmitting for the pause time specified
+            in the PFC frame.
 
   snps,reset-gpio:
     deprecated: true
@@ -208,7 +232,6 @@ properties:
       Triplet of delays. The 1st cell is reset pre-delay in micro
       seconds. The 2nd cell is reset pulse in micro seconds. The 3rd
       cell is reset post-delay in micro seconds.
-    $ref: /schemas/types.yaml#/definitions/uint32-array
     minItems: 3
     maxItems: 3
 
@@ -298,6 +321,11 @@ allOf:
               - allwinner,sun8i-r40-emac
               - allwinner,sun8i-v3s-emac
               - allwinner,sun50i-a64-emac
+              - ingenic,jz4775-mac
+              - ingenic,x1000-mac
+              - ingenic,x1600-mac
+              - ingenic,x1830-mac
+              - ingenic,x2000-mac
               - snps,dwxgmac
               - snps,dwxgmac-2.10
               - st,spear600-gmac
@@ -341,9 +369,17 @@ allOf:
               - allwinner,sun8i-r40-emac
               - allwinner,sun8i-v3s-emac
               - allwinner,sun50i-a64-emac
+              - loongson,ls2k-dwmac
+              - loongson,ls7a-dwmac
+              - ingenic,jz4775-mac
+              - ingenic,x1000-mac
+              - ingenic,x1600-mac
+              - ingenic,x1830-mac
+              - ingenic,x2000-mac
               - snps,dwmac-4.00
               - snps,dwmac-4.10a
               - snps,dwmac-4.20a
+              - snps,dwmac-5.10a
               - snps,dwxgmac
               - snps,dwxgmac-2.10
               - st,spear600-gmac

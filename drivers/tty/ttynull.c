@@ -2,13 +2,6 @@
 /*
  * Copyright (C) 2019 Axis Communications AB
  *
- * The console is useful for userspace applications which expect a console
- * device to work without modifications even when no console is available
- * or desired.
- *
- * In order to use this driver, you should redirect the console to this
- * TTY, or boot the kernel with console=ttynull.
- *
  * Based on ttyprintk.c:
  *  Copyright (C) 2010 Samo Pogacnik
  */
@@ -42,7 +35,7 @@ static int ttynull_write(struct tty_struct *tty, const unsigned char *buf,
 	return count;
 }
 
-static int ttynull_write_room(struct tty_struct *tty)
+static unsigned int ttynull_write_room(struct tty_struct *tty)
 {
 	return 65536;
 }
@@ -65,17 +58,6 @@ static struct console ttynull_console = {
 	.name = "ttynull",
 	.device = ttynull_device,
 };
-
-void __init register_ttynull_console(void)
-{
-	if (!ttynull_driver)
-		return;
-
-	if (add_preferred_console(ttynull_console.name, 0, NULL))
-		return;
-
-	register_console(&ttynull_console);
-}
 
 static int __init ttynull_init(void)
 {
@@ -102,7 +84,7 @@ static int __init ttynull_init(void)
 
 	ret = tty_register_driver(driver);
 	if (ret < 0) {
-		put_tty_driver(driver);
+		tty_driver_kref_put(driver);
 		tty_port_destroy(&ttynull_port);
 		return ret;
 	}
@@ -117,7 +99,7 @@ static void __exit ttynull_exit(void)
 {
 	unregister_console(&ttynull_console);
 	tty_unregister_driver(ttynull_driver);
-	put_tty_driver(ttynull_driver);
+	tty_driver_kref_put(ttynull_driver);
 	tty_port_destroy(&ttynull_port);
 }
 

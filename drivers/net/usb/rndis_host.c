@@ -324,7 +324,7 @@ generic_rndis_bind(struct usbnet *dev, struct usb_interface *intf, int flags)
 	 * For RX we handle drivers that zero-pad to end-of-packet.
 	 * Don't let userspace change these settings.
 	 *
-	 * NOTE: there still seems to be wierdness here, as if we need
+	 * NOTE: there still seems to be weirdness here, as if we need
 	 * to do some more things to make sure WinCE targets accept this.
 	 * They default to jumbograms of 8KB or 16KB, which is absurd
 	 * for such low data rates and which is also more than Linux
@@ -387,7 +387,7 @@ generic_rndis_bind(struct usbnet *dev, struct usb_interface *intf, int flags)
 	reply_len = sizeof *phym;
 	retval = rndis_query(dev, intf, u.buf,
 			     RNDIS_OID_GEN_PHYSICAL_MEDIUM,
-			     0, (void **) &phym, &reply_len);
+			     reply_len, (void **)&phym, &reply_len);
 	if (retval != 0 || !phym) {
 		/* OID is optional so don't fail here. */
 		phym_unspec = cpu_to_le32(RNDIS_PHYSICAL_MEDIUM_UNSPECIFIED);

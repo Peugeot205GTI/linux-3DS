@@ -6,7 +6,7 @@
 
 #ifndef CONFIG_DYNAMIC_FTRACE
 extern void (*ftrace_trace_function)(unsigned long, unsigned long,
-				     struct ftrace_ops*, struct pt_regs*);
+				     struct ftrace_ops*, struct ftrace_regs*);
 extern void ftrace_graph_caller(void);
 
 noinline void __naked ftrace_stub(unsigned long ip, unsigned long parent_ip,
@@ -236,7 +236,7 @@ void __naked return_to_handler(void)
 		"bal ftrace_return_to_handler\n\t"
 		"move $lp, $r0               \n\t"
 
-		/* restore state nedded by the ABI  */
+		/* restore state needed by the ABI  */
 		"lmw.bim $r0,[$sp],$r1,#0x0  \n\t");
 }
 
