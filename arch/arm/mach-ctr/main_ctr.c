@@ -34,8 +34,8 @@ static void __init ctr_dt_init_machine(void)
 {
 	printk("ctr_dt_init_machine\n");
 
-	nintendo3ds_bottom_setup_fb();
-	nintendo3ds_bottom_lcd_map_fb();
+	//nintendo3ds_bottom_setup_fb();
+	//nintendo3ds_bottom_lcd_map_fb();
 	ctr_pdn_setup();
 
 	of_platform_populate(NULL, of_default_bus_match_table, NULL, NULL);

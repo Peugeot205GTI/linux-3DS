@@ -8,11 +8,11 @@
 	#address-cells = <1>;
 	#size-cells = <1>;
 
-	display: framebuffer@18000000 {
+	display: framebuffer@180C4E00 {
 		compatible = "simple-framebuffer";
-		reg = <0x18000000 (400*240*2)>;
+		reg = <0x180C4E00 (320*240*2)>;
 		width = <240>;
-		height = <400>;
+		height = <320>;
 		stride = <(240*2)>;
 		format = "r5g6b5";
 	};
