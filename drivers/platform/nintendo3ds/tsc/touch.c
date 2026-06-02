@@ -108,7 +108,6 @@ static int touch_request_data(struct regmap *map, u8 *buffer)
 static void touch_input_poll(struct input_dev *input)
 {
 	struct touch_hid *touch_hid = input_get_drvdata(input);
-	struct vkb_ctx_t *vkb = &touch_hid->vkb;
 
 	u8 raw_data[0x40] __attribute__((aligned(sizeof(u32))));
 	bool pendown;
@@ -119,7 +118,7 @@ static void touch_input_poll(struct input_dev *input)
 	s16 raw_circlepad_x;
 	s16 raw_circlepad_y;
 	bool sync = false;
-	int i, j, err;
+	int err;
 
 	err = touch_request_data(touch_hid->map, raw_data);
 	if (err == -ENODATA)
@@ -171,7 +170,6 @@ static void touch_input_poll(struct input_dev *input)
 static int touch_hid_probe(struct platform_device *pdev)
 {
 	int err;
-	int i, j;
 	struct device *dev;
 	struct input_dev *input;
 	struct regmap *map;
@@ -211,13 +209,6 @@ static int touch_hid_probe(struct platform_device *pdev)
 	/* Enable VKB keys */
 	set_bit(EV_KEY, input->evbit);
 	input_set_capability(input, EV_MSC, MSC_SCAN);
-
-	for (i = 0; i < VKB_ROWS; i++) {
-		for (j = 0; j < VKB_COLS; j++) {
-			if (vkb_map_keys[i][j])
-				set_bit(vkb_map_keys[i][j], input->keybit);
-		}
-	}
 
 	touch_hid->map = map;
 	touch_hid->input_dev = input;
