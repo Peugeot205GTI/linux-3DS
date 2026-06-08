@@ -125,10 +125,6 @@ static void touch_input_poll(struct input_dev *input)
 		return;
 
 	if (err) {
-		/*
-			something bad happened
-			TODO: reboot the controller or something?
-		*/
 		return;
 	}
 
@@ -152,16 +148,23 @@ static void touch_input_poll(struct input_dev *input)
 	pendown = !(raw_data[0] & BIT(4));
 
 	if (pendown) {
-		if(!touch_hid->pendown) {
-			raw_touch_x = le16_to_cpu((raw_data[0]  << 8) | raw_data[1]);
-			raw_touch_y = le16_to_cpu((raw_data[10] << 8) | raw_data[11]);
+		raw_touch_x = le16_to_cpu((raw_data[0]  << 8) | raw_data[1]);
+		raw_touch_y = le16_to_cpu((raw_data[10] << 8) | raw_data[11]);
 
-			screen_touch_x = (u16)((u32)raw_touch_x * 320 / MAX_12BIT);
-			screen_touch_y = (u16)((u32)raw_touch_y * 240 / MAX_12BIT);
-		}
-	} else {
-		touch_hid->pendown = false;
+		screen_touch_x = (u16)((u32)raw_touch_x * 320 / MAX_12BIT);
+		screen_touch_y = (u16)((u32)raw_touch_y * 240 / MAX_12BIT);
+
+		input_report_abs(input, ABS_X, screen_touch_x);
+		input_report_abs(input, ABS_Y, screen_touch_y);
+		input_report_key(input, BTN_TOUCH, 1);
+		sync = true;
+	
+	} else if (touch_hid->pendown) {
+		input_report_key(input, BTN_TOUCH, 0);
+		sync = true;
 	}
+
+	touch_hid->pendown = pendown;
 
 	if(sync)
 		input_sync(input);
@@ -200,15 +203,21 @@ static int touch_hid_probe(struct platform_device *pdev)
 	input->dev.parent = dev;
 	input->id.bustype = BUS_HOST;
 
+	/* Enable absolute touch position reporting */
+	set_bit(EV_ABS, input->evbit);
+	set_bit(ABS_X, input->absbit);
+	set_bit(ABS_Y, input->absbit);
+	input_set_abs_params(input, ABS_X, 0, 319, 0, 0);  /* 320px width */
+	input_set_abs_params(input, ABS_Y, 0, 239, 0, 0);  /* 240px height */
+
+	/* Touch pressure/presence */
+	set_bit(BTN_TOUCH, input->keybit);
+
 	/* circle pad/mouse stuff */
 	set_bit(EV_REL, input->evbit);
 	set_bit(REL_X, input->relbit);
 	set_bit(REL_Y, input->relbit);
 	set_bit(REL_WHEEL, input->relbit);
-
-	/* Enable VKB keys */
-	set_bit(EV_KEY, input->evbit);
-	input_set_capability(input, EV_MSC, MSC_SCAN);
 
 	touch_hid->map = map;
 	touch_hid->input_dev = input;
