@@ -155,6 +155,13 @@ struct ctr_sdhc {
 	 */
 	spinlock_t done_lock;
 
+	/*
+	 * Serialises access to the CARD_IRQ_CTL/STAT/MASK registers, which are
+	 * touched from the in-band SDIO IRQ hard handler as well as the
+	 * enable/ack_sdio_irq callbacks (process context).
+	 */
+	spinlock_t sdio_lock;
+
 	struct mmc_host *mmc;
 	struct clk *sdclk;
 
@@ -171,6 +178,17 @@ struct ctr_sdhc {
 	dma_cookie_t dma_cookie;
 	struct dma_chan *dma_chan;
 	struct dma_async_tx_descriptor *txdesc;
+
+	/*
+	 * Uncached bounce buffer. All DMA data is staged here and copied to/
+	 * from the request by the CPU: the ARM11 MPCore does not snoop the
+	 * PL330 and cache-invalidate maintenance is not broadcast between cores,
+	 * so DMAing straight into the request pages leaves stale/garbage data in
+	 * whichever core's L1 later reads it. The bounce has no cached alias.
+	 */
+	void *bounce;
+	dma_addr_t bounce_dma;
+	size_t bounce_size;
 };
 
 #endif /* CTR_SDHC_H */
